@@ -95,7 +95,38 @@ def parse(policy_text: str) -> List[Rule]:
     rules: List[Rule] = []
     for match in re.finditer(r'\b(permit|forbid)\b(.*?);', text, re.S):
         effect, body = match.group(1), match.group(2)
-        head, _, guard = body.partition("when")
+
+        # The head was scanned for Action:: and nothing else, so a constraint
+        # on principal or resource was read as no constraint at all, and
+        # Rule.matches treats no constraint as matching everything. A policy
+        # reading `permit (principal == User::"alice", ...)` therefore returned
+        # allow for every principal, which is the opposite of what it says.
+        #
+        # This is the rule the module docstring already states, applied to the
+        # head rather than only to the guard. A subset that silently widens a
+        # policy is worse than no subset: it reports agreement with a reference
+        # engine while evaluating a different policy.
+        for scope in ("principal", "resource"):
+            if re.search(r'\b%s\s*(==|\bin\b|\bis\b)' % scope, body):
+                raise PolicyTypeError(
+                    "this policy constrains `%s`, and this evaluator reads "
+                    "only the action from a rule head. Evaluating it would "
+                    "drop the constraint and return a decision for principals "
+                    "or resources the policy never permitted. Cedar enforces "
+                    "it, so refusing is the only answer that agrees with the "
+                    "reference engine." % scope)
+
+        head, sep, guard = body.partition("when")
+
+        # `unless { B }` is the negation of a `when` guard. Partitioning on
+        # "when" left it sitting in the head, where nothing reads it, so the
+        # clause vanished and its rule matched unconditionally.
+        if "unless" in body:
+            raise PolicyTypeError(
+                "`unless` is not evaluated by this subset. It is the negation "
+                "of a `when` guard, and leaving it unparsed makes the rule "
+                "match unconditionally, which inverts what the policy says.")
+
         actions = _ACTION.findall(head)
         condition = None
         if guard.strip():
